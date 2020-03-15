@@ -1,0 +1,50 @@
+{
+  "workers": [
+    {
+      "start": "today-2day",
+      "interval": "6hour",
+      "range": {
+        "min": "3month",
+        "max": "today"
+      },
+      "branches": "autoland",
+      "schedulers": "relevant_tests",
+      "config_db": {"filename": "config.db"},
+      "destination": {
+        "account_info": {
+          "$ref": "file:///e:/moz-fx-dev-ekyle-treeherder-a838a7718652.json"
+        },
+        "dataset": "scheduling",
+        "table": "schedulers",
+        "schema": {
+          "push.id._i_": "integer",
+          "push.date._t_": "time",
+          "etl.timestamp._t_": "time"
+        },
+        "top_level_fields": {
+          "push.id._i_": "_push_id",
+          "push.date._t_": "_push_date",
+          "etl.timestamp": "_etl_timestamp"
+        },
+        "partition": {
+          "field": "push.date",
+          "expire": "2year"
+        },
+        "id":{
+          "field": "push.id",
+          "version": "etl.timestamp"
+        },
+        "cluster": [
+          "push.id"
+        ],
+        "sharded": true
+      }
+    }
+  ],
+  "adr": {
+
+
+
+  },
+  "debug": {}
+}

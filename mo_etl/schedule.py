@@ -9,16 +9,13 @@
 from __future__ import division
 from __future__ import unicode_literals
 
-from mo_future import text
-
+import mo_math
 from mo_dots import Data, coalesce
+from mo_future import text
 from mo_kwargs import override
 from mo_logs import Log
-
-import mo_math
-from mo_threads import Signal, Thread, Till, Process
+from mo_threads import Thread, Till, Process
 from mo_times import Duration, Date
-
 
 MAX_RUNTIME = "hour"
 WAIT_FOR_SHUTDOWN = "5minute"
