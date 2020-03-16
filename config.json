@@ -6,7 +6,11 @@
     "max": "today"
   },
   "branches": "autoland",
-  "schedulers": "relevant_tests",
+  "schedulers": [
+    "seta",
+    "relevant_tests",
+    "bugbug_push_schedules"
+  ],
   "config_db": {
     "filename": "config.sqlite",
     "upgrade": false
@@ -50,7 +54,7 @@
         "file_cache": {
           "driver": "file",
           "path": ".cache"
-        },
+        }
       }
     }
   },

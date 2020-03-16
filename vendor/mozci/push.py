@@ -9,6 +9,7 @@ from adr.query import run_query
 from adr.util.memoize import memoize, memoized_property
 from loguru import logger
 
+from mo_logs import Log
 from mozci.task import GroupResult, GroupSummary, LabelSummary, Status, Task, TestTask
 from mozci.util.hgmo import HGMO
 from mozci.util.taskcluster import find_task_id
@@ -545,28 +546,30 @@ class Push:
 
 
 def make_push_objects(**kwargs):
-    result = run_query("push_revisions", Namespace(**kwargs))
-
     pushes = []
 
-    for pushid, date, revs, parents in result["data"]:
-        topmost = list(set(revs) - set(parents))[0]
+    try:
+        result = run_query("push_revisions", Namespace(**kwargs))
 
-        cur = Push([topmost] + [r for r in revs if r != topmost])
+        for pushid, date, revs, parents in result["data"]:
+            topmost = list(set(revs) - set(parents))[0]
 
-        # avoids the need to query hgmo to find this info
-        cur._id = pushid
-        cur._date = date
+            cur = Push([topmost] + [r for r in revs if r != topmost])
 
-        pushes.append(cur)
+            # avoids the need to query hgmo to find this info
+            cur._id = pushid
+            cur._date = date
 
-    pushes.sort(key=lambda p: p._id)
+            pushes.append(cur)
 
-    for i, cur in enumerate(pushes):
-        if i != 0:
-            cur._parent = pushes[i - 1]
+        pushes.sort(key=lambda p: p._id)
 
-        if i != len(pushes) - 1:
-            cur._child = pushes[i + 1]
+        for i, cur in enumerate(pushes):
+            if i != 0:
+                cur._parent = pushes[i - 1]
 
+            if i != len(pushes) - 1:
+                cur._child = pushes[i + 1]
+    except Exception as e:
+        Log.warning("no data for {{kwargs}}", kwargs=kwargs)
     return pushes

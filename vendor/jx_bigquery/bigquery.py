@@ -348,6 +348,8 @@ class Table(Facts):
     def extend(self, rows):
         if self.read_only:
             Log.error("not for writing")
+        if len(rows)==0:
+            return
 
         try:
             update = {}
