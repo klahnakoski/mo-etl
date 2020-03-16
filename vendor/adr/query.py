@@ -11,7 +11,7 @@ import jsone
 import yaml
 from loguru import logger
 
-from adr import configuration
+from adr import sources, config
 from adr.context import RequestParser, extract_context_names, get_context_definitions
 from adr.errors import MissingDataError
 from adr.formatter import all_formatters
@@ -58,7 +58,7 @@ def load_query(name):
         dict query: dictionary representation of yaml query
         (exclude the context).
     """
-    with open(configuration.sources.get(name, query=True)) as fh:
+    with open(sources.get(name, query=True)) as fh:
         query = yaml.load(fh, Loader=yaml.SafeLoader)
         # Remove the context
         if "context" in query:
@@ -76,7 +76,7 @@ def load_query_context(name, add_contexts=[]):
         query_contexts (list): mixed array of strings (name of common contexts)
          and dictionaries (full definition of specific contexts)
     """
-    with open(configuration.sources.get(name, query=True)) as fh:
+    with open(sources.get(name, query=True)) as fh:
         query = yaml.load(fh, Loader=yaml.SafeLoader)
         # Extract query and context
         specific_contexts = query.pop("context") if "context" in query else {}
