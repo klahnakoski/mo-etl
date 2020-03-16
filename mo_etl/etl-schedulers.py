@@ -114,6 +114,7 @@ def process(config, please_stop):
                     "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                 }
             )
+        Log.note("adding {{num}} records to bigquery", num=len(data))
         destination.extend(data)
 
     try:
@@ -127,6 +128,7 @@ def process(config, please_stop):
     except Exception as e:
         Log.warning("Could not complete the etl", cause=e)
 
+    destination.merge_shards()
 
 
 def main():
@@ -134,7 +136,7 @@ def main():
         config = startup.read_settings()
         constants.set(config.constants)
 
-        adr.configure(config.adr)
+        adr.config.update(config.adr)
 
         # SHUNT ADR LOGGING TO MAIN LOGGING
         # https://loguru.readthedocs.io/en/stable/api/logger.html#loguru._logger.Logger.add
