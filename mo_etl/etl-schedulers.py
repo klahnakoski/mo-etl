@@ -9,21 +9,23 @@
 from __future__ import division
 from __future__ import unicode_literals
 
+import loguru
+
+import adr
 import jx_sqlite
 import mo_math
 from jx_bigquery import bigquery
-from mo_dots import Data, coalesce, listwrap
+from jx_python import jx
+from mo_dots import Data, coalesce, listwrap, wrap
 from mo_future import first
-from mo_logs import startup, constants, Log
-from mo_threads import Queue
+from mo_logs import startup, constants, Log, machine_metadata
+from mo_threads import Queue, Thread, MAIN_THREAD
 from mo_times import Date, Duration
 from mozci.push import make_push_objects
 from pyLibrary.env import git
 
-config = None
 
-
-def process(config):
+def process(config, please_stop):
     config.range.min = Date(config.range.min)
     config.range.max = Date(config.range.max)
     config.start = Date(config.start)
@@ -34,17 +36,18 @@ def process(config):
         config.destination
     )
 
-    todo = Queue("work")
+    todo = Queue("work", max=10000)
 
     etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
         "etl-range"
     )
-    prev_done = first(etl_config_table.query())
+    data = wrap(etl_config_table.query()).data
+    prev_done = data[0]
     done = Data(
         min=Date(coalesce(prev_done.min, config.start, "today-2day")),
         max=Date(coalesce(prev_done.max, config.start, "today-2day")),
     )
-    if not prev_done:
+    if not len(data):
         etl_config_table.add(done)
 
     if done.max < config.range.max:
@@ -66,7 +69,6 @@ def process(config):
                     todo.add((start, end, branch, sched))
             end = start
 
-
     def process_one(start, end, branch, scheduler):
         # ASSUME PREVIOUS WORK IS DONE
         # UPDATE THE DATABASE STATE
@@ -87,6 +89,7 @@ def process(config):
             scheduler=scheduler,
             branch=branch,
         )
+        data = []
         for push in pushes:
             tasks = push.get_shadow_scheduler_tasks(scheduler)
             if push.backedout:
@@ -97,43 +100,68 @@ def process(config):
             else:
                 backout = None
 
-            destination.add(
+            data.append(
                 {
                     "push": {
                         "id": push.id,
                         "date": push.date,
                         "changesets": push.changesets,
                     },
+                    "tasks": jx.sort(tasks),
                     "scheduler": scheduler,
                     "branch": branch,
                     "backout": backout,
                     "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                 }
             )
+        destination.extend(data)
 
-    def worker(please_stop):
-        try:
-            while not please_stop:
-                try:
-                    start, end, branch, scheduler = todo.pop_one()
-                except Exception:
-                    Log.note("no more work")
-                    break
-                process_one(start, end, branch, scheduler)
-        except Exception as e:
-            Log.warning("Could not complete the etl", cause=e)
+    try:
+        while not please_stop:
+            try:
+                start, end, branch, scheduler = todo.pop_one()
+            except Exception:
+                Log.note("no more work")
+                break
+            process_one(start, end, branch, scheduler)
+    except Exception as e:
+        Log.warning("Could not complete the etl", cause=e)
+
 
 
 def main():
-    global config
     try:
         config = startup.read_settings()
         constants.set(config.constants)
+
+        adr.configure(config.adr)
+
+        # SHUNT ADR LOGGING TO MAIN LOGGING
+        # https://loguru.readthedocs.io/en/stable/api/logger.html#loguru._logger.Logger.add
+        loguru.logger.remove()
+        loguru.logger.add(
+            _logging,
+            level="DEBUG",
+            format="{message}",
+            filter=lambda r: True,
+        )
         Log.start(config.debug)
+        Thread.run("processing", process, config)
+        MAIN_THREAD.wait_for_shutdown_signal(wait_forever=False)
     except Exception as e:
         Log.warning("Problem with etl! Shutting down.", cause=e)
     finally:
         Log.stop()
+
+
+def _logging(message):
+    # params = wrap(message.record)
+    # Log.note(message, default_params=params)
+
+    params = message.record
+    params['machine'] = machine_metadata
+    log_format = "{{machine.name}} (pid {{process}}) - {{time|datetime}} - {{thread}} - \"{{file}}:{{line}}\" - ({{function}}) - {{message}}"
+    Log.main_log.write(log_format, params)
 
 
 if __name__ == "__main__":
