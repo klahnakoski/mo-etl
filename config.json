@@ -23,8 +23,8 @@
       "etl.timestamp._t_": "time"
     },
     "top_level_fields": {
-      "push.id._i_": "_push_id",
-      "push.date._t_": "_push_date",
+      "push.id": "_push_id",
+      "push.date": "_push_date",
       "etl.timestamp": "_etl_timestamp"
     },
     "partition": {

@@ -56,10 +56,13 @@ def typed_encode(value, flake):
         _path = split_field(path)
         for i, _ in jx.reverse(enumerate(_path)):
             sub_path = join_field(_path[:i])
-            if not worker[sub_path].keys():
-                worker[sub_path] = None
-            else:
-                break
+            try:
+                if not worker[sub_path].keys():
+                    worker[sub_path] = None
+                else:
+                    break
+            except Exception as e:
+                Log.error("problem", cause=e)
 
     return output, update, nested
 
