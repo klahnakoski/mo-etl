@@ -72,16 +72,21 @@ class Configuration(Mapping):
     }
     locked = False
 
-    def __init__(self, path=None):
-        self.path = Path(path or os.environ.get("ADR_CONFIG_PATH") or self.DEFAULT_CONFIG_PATH)
-
-        self._config = self.DEFAULTS.copy()
-        if self.path.is_file():
-            with open(self.path, "r") as fh:
-                content = fh.read()
-                self.merge(parse(content)["adr"])
+    def __init__(self, path=None, config=None):
+        if not config:
+            self.path = Path(path or os.environ.get("ADR_CONFIG_PATH") or self.DEFAULT_CONFIG_PATH)
+            self._config = self.DEFAULTS.copy()
+            if self.path.is_file():
+                with open(self.path, "r") as fh:
+                    content = fh.read()
+                    self.merge(parse(content)["adr"])
+            else:
+                logger.warning(f"Configuration path {self.path} is not a file.")
         else:
-            logger.warning(f"Configuration path {self.path} is not a file.")
+            self._config = self.DEFAULTS.copy()
+            for k, v in config.items():
+                if v != None:
+                    self._config[k] = v
 
         self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
 
@@ -131,3 +136,4 @@ class Configuration(Mapping):
 
 
 config = Configuration()
+sources = None
