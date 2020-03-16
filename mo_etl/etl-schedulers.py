@@ -105,7 +105,7 @@ def process(config, please_stop):
                     "push": {
                         "id": push.id,
                         "date": push.date,
-                        "changesets": push.changesets,
+                        "changesets": push.revs,
                     },
                     "tasks": jx.sort(tasks),
                     "scheduler": scheduler,

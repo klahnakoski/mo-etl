@@ -458,18 +458,18 @@ class Push:
             runnable_type
         ).items():
             count = 0
-            other = self.parent
+            other = self.parent()
             prior_regression = False
 
             while count < MAX_DEPTH:
-                runnable_summaries = getattr(other, f"{runnable_type}_summaries")
+                runnable_summaries = getattr(other, f"{runnable_type}_summaries")()
 
                 if name in runnable_summaries:
                     if runnable_summaries[name].status != Status.PASS:
                         prior_regression = True
                     break
 
-                other = other.parent
+                other = other.parent()
                 count += 1
 
             total_count = count + child_count
