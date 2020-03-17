@@ -14,6 +14,7 @@ import loguru
 import adr
 import jx_sqlite
 import mo_math
+from adr.errors import MissingDataError
 from jx_bigquery import bigquery
 from jx_python import jx
 from mo_dots import Data, coalesce, listwrap, wrap
@@ -78,9 +79,14 @@ def process(config, please_stop):
         etl_config_table.update({"set": done})
 
         # compute dates in range
-        pushes = make_push_objects(
-            from_date=start.format(), to_date=end.format(), branch=branch
-        )
+        try:
+            pushes = make_push_objects(
+                from_date=start.format(), to_date=end.format(), branch=branch
+            )
+        except MissingDataError:
+            pushes = []
+        except Exception as e:
+            raise Log.error("not expected", cause=e)
 
         Log.note(
             "Found {{num}} pushes for {{scheduler}} on {{branch}} in ({{start}}, {{end}})",
@@ -94,7 +100,7 @@ def process(config, please_stop):
         for push in pushes:
             tasks = push.get_shadow_scheduler_tasks(scheduler)
             likely_regressions = push.get_likely_regressions("label")
-            backed_out_by = push.backedoutby()
+            backout_by = push.backedoutby()
             candidate_regressions = [
                 {
                     "name": name,
@@ -104,7 +110,7 @@ def process(config, please_stop):
                 for name, (child_count, status) in push.get_candidate_regressions("label").items()
             ]
             backout_type = None
-            if backed_out_by:
+            if backout_by:
                 if likely_regressions & tasks:
                     backout_type = "primary"
                 else:
@@ -123,7 +129,7 @@ def process(config, please_stop):
                     "scheduler": scheduler,
                     "branch": branch,
                     "backout_type": backout_type,
-                    "backed_out_by": backed_out_by,
+                    "backout_by": backout_by,
                     "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                 }
             )

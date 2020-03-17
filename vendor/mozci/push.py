@@ -547,29 +547,25 @@ class Push:
 
 def make_push_objects(**kwargs):
     pushes = []
+    result = run_query("push_revisions", Namespace(**kwargs))
 
-    try:
-        result = run_query("push_revisions", Namespace(**kwargs))
+    for pushid, date, revs, parents in result["data"]:
+        topmost = list(set(revs) - set(parents))[0]
 
-        for pushid, date, revs, parents in result["data"]:
-            topmost = list(set(revs) - set(parents))[0]
+        cur = Push([topmost] + [r for r in revs if r != topmost])
 
-            cur = Push([topmost] + [r for r in revs if r != topmost])
+        # avoids the need to query hgmo to find this info
+        cur._id = pushid
+        cur._date = date
 
-            # avoids the need to query hgmo to find this info
-            cur._id = pushid
-            cur._date = date
+        pushes.append(cur)
 
-            pushes.append(cur)
+    pushes.sort(key=lambda p: p._id)
 
-        pushes.sort(key=lambda p: p._id)
+    for i, cur in enumerate(pushes):
+        if i != 0:
+            cur._parent = pushes[i - 1]
 
-        for i, cur in enumerate(pushes):
-            if i != 0:
-                cur._parent = pushes[i - 1]
-
-            if i != len(pushes) - 1:
-                cur._child = pushes[i + 1]
-    except Exception as e:
-        Log.warning("no data for {{kwargs}}", kwargs=kwargs)
+        if i != len(pushes) - 1:
+            cur._child = pushes[i + 1]
     return pushes
