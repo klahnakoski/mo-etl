@@ -16,6 +16,7 @@ from adr.context import RequestParser, extract_context_names, get_context_defini
 from adr.errors import MissingDataError
 from adr.formatter import all_formatters
 from adr.util.req import requests_retry_session
+from mo_times import Timer
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -124,8 +125,8 @@ def run_query(name, args):
 
     key = f"run_query.{name}.{query_hash}"
     if config.cache.has(key):
-        logger.debug(f"Loading results from cache")
-        return config.cache.get(key)
+        with Timer("Loading results from cache"):
+            return config.cache.get(key)
 
     logger.trace(f"JSON representation of query:\n{query_str}")
     result = query_activedata(query_str, config.url)

@@ -22,6 +22,7 @@ from mo_logs import startup, constants, Log, machine_metadata
 from mo_threads import Queue, Thread, MAIN_THREAD
 from mo_times import Date, Duration
 from mozci.push import make_push_objects
+from mozci.task import Status
 from pyLibrary.env import git
 
 
@@ -92,13 +93,22 @@ def process(config, please_stop):
         data = []
         for push in pushes:
             tasks = push.get_shadow_scheduler_tasks(scheduler)
-            if push.backedout:
-                if push.get_likely_regressions("label") & tasks:
-                    backout = "primary"
+            likely_regressions = push.get_likely_regressions("label")
+            backed_out_by = push.backedoutby()
+            candidate_regressions = [
+                {
+                    "name": name,
+                    "child_count": child_count,
+                    "status": {Status.PASS: "pass", Status.FAIL: "fail", Status.INTERMITTENT: "intermittent"}[status]
+                }
+                for name, (child_count, status) in push.get_candidate_regressions("label").items()
+            ]
+            backout_type = None
+            if backed_out_by:
+                if likely_regressions & tasks:
+                    backout_type = "primary"
                 else:
-                    backout = "secondary"
-            else:
-                backout = None
+                    backout_type = "secondary"
 
             data.append(
                 {
@@ -108,9 +118,12 @@ def process(config, please_stop):
                         "changesets": push.revs,
                     },
                     "tasks": jx.sort(tasks),
+                    "likely_regressions": jx.sort(likely_regressions),
+                    "candidate_regressions": jx.sort(candidate_regressions, "name"),
                     "scheduler": scheduler,
                     "branch": branch,
-                    "backout": backout,
+                    "backout_type": backout_type,
+                    "backed_out_by": backed_out_by,
                     "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                 }
             )

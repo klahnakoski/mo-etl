@@ -9,7 +9,9 @@
 #
 from __future__ import absolute_import, division, unicode_literals
 import string
+from enum import EnumMeta
 
+import mo_math
 from jx_bigquery.sql import escape_name, TIMESTAMP_FORMAT, unescape_name, ApiName
 from jx_python import jx
 from mo_dots import is_many, is_data, wrap, split_field, join_field, Data, SLOT, FlatList, NullType, DataObject, \
@@ -56,13 +58,10 @@ def typed_encode(value, flake):
         _path = split_field(path)
         for i, _ in jx.reverse(enumerate(_path)):
             sub_path = join_field(_path[:i])
-            try:
-                if not worker[sub_path].keys():
-                    worker[sub_path] = None
-                else:
-                    break
-            except Exception as e:
-                Log.error("problem", cause=e)
+            if not worker[sub_path].keys():
+                worker[sub_path] = None
+            else:
+                break
 
     return output, update, nested
 
@@ -75,6 +74,8 @@ def _typed_encode(value, schema):
     nested - True IF NESTING IS REQUIRED (CONSIDERED SERIOUS SCHEMA CHANGE)
     """
     if is_many(value):
+        if len(value) == 0:
+            return None, None, False
         output = []
         update = {}
         nest_added = False
@@ -107,7 +108,8 @@ def _typed_encode(value, schema):
             if not child_schema:
                 child_schema = schema[k] = {}
             result, more_update, n = _typed_encode(v, child_schema)
-            output[text(escape_name(k))] = result
+            if result != None:
+                output[text(escape_name(k))] = result
             set_default(update, {k: more_update})
             nest_added |= n
         return output, update or None, nest_added
@@ -121,7 +123,7 @@ def _typed_encode(value, schema):
             )
         return v, None, False
     elif value is None:
-        return {text(escape_name(t)): None for t, child_schema in schema.items()}, None, False
+        return {text(escape_name(t)): None for t, child_schema in schema.items()} or None, None, False
     else:
         v, inserter_type, json_type = schema_type(value)
         child_schema = schema.get(inserter_type)
@@ -145,11 +147,18 @@ def _typed_encode(value, schema):
 
 
 def schema_type(value):
-    jt = python_type_to_json_type[value.__class__]
+    clazz = value.__class__
+    if clazz.__class__ == EnumMeta:
+        return value.name, json_type_to_inserter_type[STRING], STRING
+
+    jt = python_type_to_json_type[clazz]
     if jt == TIME:
         v = parse(value).format(TIMESTAMP_FORMAT)
     elif jt == NUMBER:
-        v = float(value)
+        if mo_math.is_finite(value):
+            v = float(value)
+        else:
+            v = None
     else:
         v = value
     return v, json_type_to_inserter_type[jt], jt

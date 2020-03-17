@@ -391,7 +391,7 @@ class Push:
                     # children, so it is definitely not a regression in the current.
                     continue
 
-                if summary.status == Status.PASS:
+                if summary.status() == Status.PASS:
                     passing_runnables.add(name)
                     continue
 
@@ -414,7 +414,7 @@ class Push:
                         # If the failure was classified as fixed by commit, and the fixing commit
                         # is a backout of the current push, it is definitely a regression of the
                         # current push.
-                        candidate_regressions[name] = (-math.inf, summary.status)
+                        candidate_regressions[name] = (-math.inf, summary.status())
                         continue
                     elif all(
                         HGMO.create(n, branch=self.branch).is_backout
@@ -431,7 +431,7 @@ class Push:
                     # children, we don't want to increase the previous distance.
                     continue
 
-                candidate_regressions[name] = (count, summary.status)
+                candidate_regressions[name] = (count, summary.status())
 
             other = other.child()
             count += 1
@@ -466,7 +466,7 @@ class Push:
                 runnable_summaries = getattr(other, f"{runnable_type}_summaries")()
 
                 if name in runnable_summaries:
-                    if runnable_summaries[name].status != Status.PASS:
+                    if runnable_summaries[name].status() != Status.PASS:
                         prior_regression = True
                     break
 

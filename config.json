@@ -51,12 +51,23 @@
       "retention": 10080,
       "serializer": "json",
       "stores": {
+        "file": {
+          "driver":"seeded-file",
+          "path": ".cache",
+          "url": "https://s3-us-west-2.amazonaws.com/communitytc-bugbug/data/adr_cache.tar.zst",
+          "archive_relpath": "data/adr_cache",
+          "reseed_interval": 10080
+
+        },
         "file_cache": {
           "driver": "file",
           "path": ".cache"
         }
       }
     }
+  },
+  "constants": {
+    "jx_bigquery.bigquery.DEBUG": true
   },
   "debug": {
     "trace": true
