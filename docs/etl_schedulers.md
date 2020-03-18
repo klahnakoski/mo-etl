@@ -10,11 +10,22 @@
 * after backout_by
 
 
-Rows: before the rollback
+
+### Chart of single job, and if it can be blamed for a regression
+
+* **none** - Never run
+* **fail** - always fails
+* **pass** - always passed
+* **inter** - intermittent
+
+
+* Rows: before the backed out
+* Columns: After the backouted out
+* `X` possible cause 
 
 |       | none | fail | pass | inter | 
 |-------|------|------|------|-------|
 | none  |      |      |      |       | 
 | fail  |      |      |      |       |
-| pass  |      |  X   |      |   X   |
-| inter |      |  X   |      |       |
+| pass  |      |  `X` |      |  `X`  |
+| inter |      |  `X` |      |       |
