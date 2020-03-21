@@ -15,6 +15,25 @@
     "filename": "config.sqlite",
     "upgrade": false
   },
+  "hg_cache": {
+    "use_cache": true,
+    "hg": {
+      "url": "https://hg.mozilla.org"
+    },
+    "repo": {
+      "host": "http://localhost",
+      "port": 9200,
+      "$ref": "#es",
+      "index": "repo",
+      "type": "revision",
+      "typed": false,
+      "timeout": 300,
+      "consistency": "one",
+      "debug": false,
+      "limit_replicas": false
+    }
+  },
+
   "destination": {
     "account_info": {
       "$ref": "file:///e:/moz-fx-dev-ekyle-treeherder-a838a7718652.json"
