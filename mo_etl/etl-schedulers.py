@@ -19,14 +19,16 @@ import mo_math
 from adr.errors import MissingDataError
 from jx_bigquery import bigquery
 from jx_python import jx
-from mo_dots import Data, coalesce, listwrap, wrap
+from mo_dots import Data, coalesce, listwrap, wrap, set_default
+from mo_future import text
 from mo_logs import startup, constants, Log, machine_metadata
 from mo_threads import Queue, Thread, MAIN_THREAD, THREAD_STOP, Lock
-from mo_times import Date, Duration
+from mo_times import Date, Duration, Timer
 from mozci.push import make_push_objects
 from mozci.task import Status
 from pyLibrary.env import git
 
+DEFAULT_START = "today-2day"
 LOOK_BACK = 30
 LOOK_FORWARD = 30
 
@@ -53,8 +55,8 @@ def process(config, please_stop):
     data = wrap(etl_config_table.query()).data
     prev_done = data[0]
     done = Data(
-        min=Date(coalesce(prev_done.min, config.start, "today-2day")),
-        max=Date(coalesce(prev_done.max, config.start, "today-2day")),
+        min=Date(coalesce(prev_done.min, config.start, DEFAULT_START)),
+        max=Date(coalesce(prev_done.max, config.start, DEFAULT_START)),
     )
     if not len(data):
         etl_config_table.add(done)
@@ -161,30 +163,6 @@ def process(config, please_stop):
         Log.warning("Could not complete the etl", cause=e)
 
     config._destination.merge_shards()
-
-
-def main():
-    try:
-        config = startup.read_settings()
-        constants.set(config.constants)
-
-        adr.config.update(config.adr)
-
-        # SHUNT ADR LOGGING TO MAIN LOGGING
-        # https://loguru.readthedocs.io/en/stable/api/logger.html#loguru._logger.Logger.add
-        loguru.logger.remove()
-        loguru.logger.add(
-            _logging, level="DEBUG", format="{message}", filter=lambda r: True,
-        )
-        Log.start(config.debug)
-        config = normalize_config(config)
-
-        Thread.run("processing", process, config)
-        MAIN_THREAD.wait_for_shutdown_signal(wait_forever=False)
-    except Exception as e:
-        Log.warning("Problem with etl! Shutting down.", cause=e)
-    finally:
-        Log.stop()
 
 
 def all_pushes(config):
@@ -208,8 +186,7 @@ def all_pushes(config):
         while start < config.range.max:
             end = start + config.interval
             for branch in config.branches:
-                for sched in config.schedulers:
-                    todo.add((start, end, branch, sched))
+                todo.add((start, end, branch))
             start = end
     if config.range.min < done.min:
         # ADD WORK GOING BACKWARDS
@@ -217,162 +194,174 @@ def all_pushes(config):
         while config.range.min < end:
             start = end - config.interval
             for branch in config.branches:
-                for sched in config.schedulers:
-                    todo.add((start, end, branch, sched))
+                todo.add((start, end, branch))
             end = start
 
-
-    def process_one(start, end, branch, scheduler):
+    def process_one(start, end, branch):
         # ASSUME PREVIOUS WORK IS DONE
         # UPDATE THE DATABASE STATE
         done.min = mo_math.min(end, done.min)
         done.max = mo_math.max(start, done.max)
         etl_config_table.update({"set": done})
 
-        # compute dates in range
+        # WE REQUIRE SOME EXTRA PUSHES TO CALCULATE STATS
+        extra = []
         try:
             pushes = make_push_objects(
                 from_date=start.format(), to_date=end.format(), branch=branch
             )
+            start = pushes[0]
+            end = pushes[-1]
+            for i in range(LOOK_BACK):
+                start = start.parent()
+                extra.append(start)
+            for i in range(LOOK_FORWARD):
+                try:
+                    end = end.child()
+                except Exception as e:
+                    # WE DO NOT HAVE ENOUGH DATA YET
+                    raise e
+                extra.append(end)
         except MissingDataError:
             pushes = []
         except Exception as e:
             raise Log.error("not expected", cause=e)
 
         Log.note(
-            "Found {{num}} pushes for {{scheduler}} on {{branch}} in ({{start}}, {{end}})",
+            "Found {{num}} pushes on {{branch}} in ({{start}}, {{end}})",
             num=len(pushes),
-            start=start,
-            end=end,
-            scheduler=scheduler,
+            start=start.id,
+            end=end.id,
             branch=branch,
         )
-        data = []
-        for push in pushes:
-            tasks = push.get_shadow_scheduler_tasks(scheduler)
-            likely_regressions = push.get_likely_regressions("label")
-            backout_by = push.backedoutby()
-            candidate_regressions = [
-                {
-                    "name": name,
-                    "child_count": child_count,
-                    "status": {
-                        Status.PASS: "pass",
-                        Status.FAIL: "fail",
-                        Status.INTERMITTENT: "intermittent",
-                    }[status],
-                }
-                for name, (child_count, status) in push.get_candidate_regressions(
-                    "label"
-                ).items()
-            ]
-            backout_type = None
-            if backout_by:
-                if likely_regressions & tasks:
-                    backout_type = "primary"
-                else:
-                    backout_type = "secondary"
 
-            data.append(
-                {
-                    "push": {
-                        "id": push.id,
-                        "date": push.date,
-                        "changesets": push.revs,
-                    },
-                    "tasks": jx.sort(tasks),
-                    "likely_regressions": jx.sort(likely_regressions),
-                    "candidate_regressions": jx.sort(candidate_regressions, "name"),
-                    "scheduler": scheduler,
-                    "branch": branch,
-                    "backout_type": backout_type,
-                    "backout_by": backout_by,
-                    "etl": {"version": git.get_revision(), "timestamp": Date.now()},
+        data = []
+        labels = set()
+        results = Data()
+
+        with Timer("accumulate label stats for all pushes"):
+            for push in extra + pushes:
+                labels |= push.label_summaries().keys()
+                for name, summary in push.label_summaries().items():
+                    results[name][text(push.id)][summary.status().name] += 1
+
+        for push in pushes:
+            # RECORD THE PUSH
+            backout_hash = push.backedoutby()
+            with Timer("get tasks for push {{push}}", {"push":push.id}):
+                tasks = {
+                    s: jx.sort(push.get_shadow_scheduler_tasks(s))
+                    for s in config.schedulers
                 }
-            )
+                if not backout_hash:
+                    data.append(
+                        {
+                            "push": {
+                                "id": push.id,
+                                "date": push.date,
+                                "changesets": push.revs,
+                            },
+                            "tasks": tasks,
+                            "branch": branch,
+                            "etl": {"version": git.get_revision(), "timestamp": Date.now()},
+                        }
+                    )
+                    continue
+
+            # ENSURE WE HAVE THE PUSH SEQUENCE COVERING (start, bad, backout, end)
+            # sequence = before + during + after
+            indicators = []
+            start = bad = end = push
+            with Timer("find indicators for {{push}}", {"push": push.id}):
+
+                before = []
+                during = []
+                after = []
+                for i in range(LOOK_BACK):
+                    start = start.parent()
+                    before.append(text(start.id))
+                while backout_hash not in end.revs:
+                    during.append(text(end.id))
+                    end = end.child()
+                for i in range(LOOK_FORWARD):
+                    after.append(text(end.id))
+                    end = end.child()
+
+                parts = Data(before=before, during=during, after=after)
+                labels = copy(labels)
+
+                for label in jx.sort(labels):
+                    sequence = results[label]
+
+                    about = Data()
+                    for p in ("before", "during", "after"):
+                        for s in Status:
+                            about[p][s.name] = mo_math.SUM(
+                                sequence[i][s.name] for i in parts[p]
+                            )
+
+                    # IS THIS LABEL AN INDICATOR?
+                    if (
+                        coalesce(about.before.PASS, 0)
+                        > coalesce(about.before.FAIL, 0)  # SUCCESS BEFORE BAD PUSH
+                        and coalesce(about.during.PASS, 0)
+                        < coalesce(about.during.FAIL, 0)  # FAILURE DURING BAD PUSH
+                        and coalesce(about.after.PASS, 0)
+                        > coalesce(about.after.FAIL, 0)  # SUCCESS AFTER BACKOUT
+                    ):
+                        indicators.append(set_default({"label": label}, about))
+
+                data.append(
+                    {
+                        "push": {
+                            "id": push.id,
+                            "date": push.date,
+                            "changesets": push.revs,
+                        },
+                        "tasks": tasks,
+                        "indicators": indicators,
+                        "branch": branch,
+                        "etl": {"version": git.get_revision(), "timestamp": Date.now()},
+                    }
+                )
+
         Log.note("adding {{num}} records to bigquery", num=len(data))
         config._destination.extend(data)
 
     try:
-        while not please_stop:
+        while True:
             try:
-                start, end, branch, scheduler = todo.pop_one()
+                start, end, branch = todo.pop_one()
             except Exception:
                 Log.note("no more work")
                 break
-            process_one(start, end, branch, scheduler)
+            process_one(start, end, branch)
     except Exception as e:
         Log.warning("Could not complete the etl", cause=e)
-
-    config._destination.merge_shards()
-
-
+    else:
+        config._destination.merge_shards()
 
 
+def main():
+    try:
+        config = startup.read_settings()
+        constants.set(config.constants)
 
+        adr.config.update(config.adr)
 
-    state = Data(locker=Lock(), labels={})
-    backedout = Queue("backouts")
-
-    def get_parents(from_date, start_push, please_stop):
-        # ITERATE BACKWARDS, TRIGGERING LOCAL CACHE
-        push = start_push
-        i = 0
-        while not please_stop and Date(push.date) > from_date:
-            push.id
-            push.revs
-            push.backsoutnodes
-            with state.locker:
-                state.labels |= push.label_summaries().keys()
-                for name, summary in push.label_summaries().items():
-                    state.results[name][push.id][summary.status.name] += 1
-            if push.backedoutby and i > LOOK_FORWARD:
-                backedout.add(push)
-
-        backedout.add(THREAD_STOP)
-
-    worker = Thread.run("get_pushes", get_parents)
-
-    # GET TASKS AND TASK RESULTS FOR PUSH
-    # FOR EACH BACKED OUT PUSH
-    # BETWEEN BACKEDOUT AND BACKOUT DETERMINE TASK STATUS
-    while True:
-        bad = backedout.pop()
-        # ENSURE WE HAVE THE PUSH SEQUENCE COVERING (start, bad, backout, end)
-        # sequence = before + during + after
-        parts = Data()
-        start = bad
-        for i in range(LOOK_BACK):
-            start = start.parent
-            parts.before += [start.id]
-        backout = bad.backedoutby
-        end = bad
-        while end.id < backout.id:
-            parts.during += [end.id]
-            end = end.child
-        for i in range(LOOK_FORWARD):
-            parts.after += [end.id]
-            end = end.child
-
-        with state.locker:
-            labels = copy(state.labels)
-
-        indicators = []
-        for label in jx.sort(labels):
-            pushes = state.results[label]
-
-            about = Data()
-            for p in ("before", "during", "after"):
-                for s in Status:
-                    about[p][s.name] = sum(pushes[i][s.name] for i in parts[p])
-
-            # IS THIS LABEL AN INDICATOR?
-            if (
-                coalesce(about.before.PASS, 0) > coalesce(about.before.FAIL, 0)  # SUCCESS BEFORE BAD PUSH
-                and coalesce(about.during.PASS, 0) < coalesce(about.during.FAIL, 0)  # FAILURE DURING BAD PUSH
-                and coalesce(about.after.PASS, 0) > coalesce(about.after.FAIL, 0)  # SUCCESS AFTER BACKOUT
-            ):
-                indicators.add(label)
+        # SHUNT ADR LOGGING TO MAIN LOGGING
+        # https://loguru.readthedocs.io/en/stable/api/logger.html#loguru._logger.Logger.add
+        loguru.logger.remove()
+        loguru.logger.add(
+            _logging, level="DEBUG", format="{message}", filter=lambda r: True,
+        )
+        Log.start(config.debug)
+        config = normalize_config(config)
+        all_pushes(config)
+    except Exception as e:
+        Log.warning("Problem with etl! Shutting down.", cause=e)
+    finally:
+        Log.stop()
 
 
 def _logging(message):
