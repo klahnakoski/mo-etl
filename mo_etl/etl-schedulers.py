@@ -9,13 +9,17 @@
 from __future__ import division
 from __future__ import unicode_literals
 
+import os
 from copy import copy
 
 import loguru
+from cachy import CacheManager
+from cachy.stores import NullStore
 
 import adr
 import jx_sqlite
 import mo_math
+from adr.configuration import Configuration
 from adr.errors import MissingDataError
 from jx_bigquery import bigquery
 from jx_python import jx
@@ -125,6 +129,7 @@ def all_pushes(config):
                 labels |= push.label_summaries().keys()
                 for name, summary in push.label_summaries().items():
                     results[name][text(push.id)][summary.status().name] += 1
+        labels = jx.sort(labels)
 
         for push in pushes:
             # RECORD THE PUSH
@@ -149,6 +154,12 @@ def all_pushes(config):
                     )
                     continue
 
+            regressed_labels = set()
+            with Timer("find regressed labels for {{push}}", {"push": push.id}):
+                while backout_hash not in end.revs:
+                    regressed_labels |= end.get_regressions.keys()
+                    end = end.child()
+
             # ENSURE WE HAVE THE PUSH SEQUENCE COVERING (start, bad, backout, end)
             # sequence = before + during + after
             indicators = []
@@ -169,9 +180,8 @@ def all_pushes(config):
                     end = end.child()
 
                 parts = Data(before=before, during=during, after=after)
-                labels = copy(labels)
 
-                for label in jx.sort(labels):
+                for label in labels:
                     sequence = results[label]
 
                     about = Data()
@@ -201,6 +211,7 @@ def all_pushes(config):
                         },
                         "tasks": tasks,
                         "indicators": indicators,
+                        "regressed_labels": regressed_labels,
                         "branch": branch,
                         "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                     }
@@ -227,6 +238,25 @@ def main():
     try:
         config = startup.read_settings()
         constants.set(config.constants)
+
+        # ADD CONFIGURATION INJECTOR
+        def update(self, config):
+            """
+            Update the configuration object with new parameters
+            :param config: dict of configuration
+            """
+            for k, v in config.items():
+                if v != None:
+                    self._config[k] = v
+
+            self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
+
+            # Use the NullStore by default. This allows us to control whether
+            # caching is enabled or not at runtime.
+            self._config["cache"].setdefault("stores", {"null": {"driver": "null"}})
+            object.__setattr__(self, "cache", CacheManager(self._config["cache"]))
+            self.cache.extend("null", lambda driver: NullStore())
+        setattr(Configuration, "update", update)
 
         adr.config.update(config.adr)
 
