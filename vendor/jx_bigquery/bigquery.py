@@ -37,7 +37,6 @@ from mo_sql import (
     SQL_INSERT,
     SQL_DESC,
     SQL_UNION_ALL,
-    SQL_STAR,
 )
 from mo_threads import Till
 from mo_times import MINUTE, Timer
@@ -330,7 +329,25 @@ class Table(Facts):
         """
         sql = sql_query({"from": self.full_name})
         query_job = self.container.client.query(text(sql))
-        return list(untyped(dict(row)) for row in query_job)
+
+        if not self._flake._top_level_fields.keys():
+            for row in query_job:
+                yield untyped(dict(row))
+        else:
+            top2deep = {name: path for path, name in self._flake._top_level_fields.items()}
+            for row in query_job:
+                output = {}
+                doc = dict(row)
+                # COPY ALL BUT TOP LEVEL FIELDS
+                for k, v in doc.items():
+                    deep = top2deep.get(k)
+                    if deep is None:
+                        output[k] = v
+                # INSERT TOP LEVEL FIELDS
+                reach = wrap(output)
+                for k, p in top2deep.items():
+                    reach[p] = doc[k]
+                yield untyped(output)
 
     @property
     def flake(self):
@@ -622,20 +639,11 @@ def gen_select(total_flake, flake):
     def _gen_select(
         source_path, source_tops, source_flake, total_path, total_tops, total_flake
     ):
-        if total_flake == source_flake and total_tops == source_tops:
-            if not source_path:  # TOP LEVEL FIELDS
-                return [
-                    quote_column(escape_name(k))
-                    for k in total_flake.keys()
-                    if not is_text(total_tops[k])
-                ]
-            elif total_tops:
-                Log.error("top level fields are not expected at this point (?nested?)")
-            else:
-                return [
-                    quote_column(source_path + escape_name(k))
-                    for k in total_flake.keys()
-                ]
+        if total_flake == source_flake and not total_tops:
+            return [
+                quote_column(source_path + escape_name(k))
+                for k in jx.sort(total_flake.keys())
+            ]
 
         if NESTED_TYPE in total_flake:
             # PROMOTE EVERYTHING TO REPEATED
@@ -693,7 +701,7 @@ def gen_select(total_flake, flake):
             if is_text(k_total_tops):
                 # DO NOT INCLUDE TOP_LEVEL_FIELDS
                 pass
-            elif t == v and k_total_tops == k_tops:
+            elif t == v and not k_total_tops and not k_tops:
                 selection.append(
                     ConcatSQL(
                         quote_column(source_path + escape_name(k)),
@@ -727,13 +735,14 @@ def gen_select(total_flake, flake):
                         type=v,
                         main=t,
                     )
-                inner = [
-                    ConcatSQL(
-                        SQL_SELECT_AS_STRUCT,
-                        JoinSQL(ConcatSQL(SQL_COMMA, SQL_CR), selects),
-                    )
-                ]
-                selection.append(sql_alias(sql_call("", *inner), escape_name(k)))
+                if selects:
+                    inner = [
+                        ConcatSQL(
+                            SQL_SELECT_AS_STRUCT,
+                            JoinSQL(ConcatSQL(SQL_COMMA, SQL_CR), selects),
+                        )
+                    ]
+                    selection.append(sql_alias(sql_call("", *inner), escape_name(k)))
             elif is_text(t):
                 if is_text(k_tops):
                     # THE SOURCE HAS THIS PROPERTY AS A TOP_LEVEL_FIELD
@@ -782,7 +791,7 @@ def gen_select(total_flake, flake):
     )
     tops = []
 
-    for path, name in total_flake.top_level_fields.leaves():
+    for path, name in jx.sort(total_flake.top_level_fields.leaves(), 0):
         source = flake.top_level_fields[path]
         if source:
             # ALREADY TOP LEVEL FIELD

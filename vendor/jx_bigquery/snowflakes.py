@@ -25,11 +25,14 @@ from jx_bigquery.typed_encoder import (
     json_type_to_inserter_type,
 )
 from jx_python import jx
-from mo_dots import join_field, startswith_field, coalesce, Data, wrap, split_field
+from mo_dots import join_field, startswith_field, coalesce, Data, wrap, split_field, Null
 from mo_future import is_text, first, sort_using_key, text, OrderedDict
-from mo_json import NESTED, STRUCT, OBJECT, STRING, NUMBER
+from mo_json import NESTED, STRUCT, OBJECT, STRING, NUMBER, scrub
 from mo_logs import Log, Except
 from mo_times.dates import Date
+
+
+DEBUG = True
 
 
 class Snowflake(jx_base.Snowflake):
@@ -46,10 +49,16 @@ class Snowflake(jx_base.Snowflake):
         :param top_level_fields:  REQUIRED TO MAP INNER PROPERTIES TO THE TOP LEVEL, AS REQUIRED BY BQ FOR PARTITIONS AND CLUSTERING
         :param partition:  THE partition.field MUST BE KNOWN SO IT CAN BE CONVERTED FROM UNIX TIME TO bq TIMESTAMP
         """
-        if not is_text(es_index):
-            Log.error("expecting string")
-        self.es_index = es_index
         self.schema = schema or {}
+        if DEBUG:
+            if not is_text(es_index):
+                Log.error("expecting string")
+            if any(len(split_field(k)) > 1 for k in self.schema.keys()):
+                Log.error("expecting schema to be a deep structure")
+            if any(len(split_field(k)) > 1 for k in top_level_fields.keys()):
+                Log.error("expecting top level fields to be a deep structure")
+
+        self.es_index = es_index
         self._columns = None
         self.top_level_fields = top_level_fields
         self._top_level_fields = None  # dict FROM FULL-API-NAME TO TOP-LEVEL-FIELD NAME
@@ -143,7 +152,7 @@ class Snowflake(jx_base.Snowflake):
             )
             self._columns = columns
 
-            self._top_level_fields = {}
+            self._top_level_fields = OrderedDict()  # FORCE ORDERING FAILURE
             for path, field in wrap(self.top_level_fields).leaves():
                 leaves = self.leaves(path)
                 if not leaves:
@@ -154,9 +163,8 @@ class Snowflake(jx_base.Snowflake):
                     )
                 specific_path = first(leaves).name
                 self._top_level_fields[
-                    ".".join(map(text, map(escape_name, split_field(specific_path))))
+                    ".".join(text(escape_name(step)) for step in split_field(specific_path))
                 ] = field
-
             self._partition = Partition(kwargs=self.partition, flake=self)
 
         return self._columns
