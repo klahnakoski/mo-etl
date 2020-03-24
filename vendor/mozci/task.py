@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List
 
+import requests
 from adr.util import memoize, memoized_property
 from loguru import logger
 from urllib3.response import HTTPResponse
 
+from mozci.errors import ArtifactNotFound
 from mozci.util.taskcluster import get_artifact, list_artifacts
 
 
@@ -77,7 +79,7 @@ class Task:
     def failed(self):
         return self.result in ("busted", "exception", "testfailed")
 
-    @memoize
+    @memoized_property
     def artifacts(self):
         """List the artifacts that were uploaded by this task."""
         return [artifact["name"] for artifact in list_artifacts(self.id)]
@@ -94,8 +96,18 @@ class Task:
 
         Returns:
             Contents of the artifact.
+
+        Raises:
+            mozci.errors.ArtifactNotFound: When the requested artifact does not
+                                           exist.
         """
-        data = get_artifact(self.id, path)
+        try:
+            data = get_artifact(self.id, path)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise ArtifactNotFound(path, self.id, self.label) from e
+            raise
+
         if not isinstance(data, HTTPResponse):
             return data
 
@@ -206,6 +218,7 @@ class TestTask(Task):
 
 @dataclass
 class RunnableSummary(ABC):
+    @property
     def classifications(self):
         return [
             (t.classification, t.classification_note) for t in self.tasks if t.failed
@@ -227,7 +240,7 @@ class GroupSummary(RunnableSummary):
     def __post_init__(self):
         assert all(self.name in t.groups for t in self.tasks)
 
-    @memoize
+    @memoized_property
     def status(self):
         overall_status_by_label = {}
         for task in self.tasks:
@@ -271,7 +284,7 @@ class LabelSummary(RunnableSummary):
     def __post_init__(self):
         assert all(t.label == self.label for t in self.tasks)
 
-    @memoize
+    @memoized_property
     def status(self):
         overall_status = None
         for task in self.tasks:

@@ -4,7 +4,6 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import functools
-import logging
 
 import requests
 import taskcluster_urls as liburls
@@ -61,8 +60,12 @@ def get_artifact(task_id, path):
     """
     try:
         response = _do_request(get_artifact_url(task_id, path))
-    except requests.exceptions.HTTPError:
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code != 404:
+            raise
+
         response = _do_request(get_artifact_url(task_id, path, old_deployment=True))
+
     return _handle_artifact(path, response)
 
 
@@ -87,6 +90,6 @@ def find_task_id(index_path, use_proxy=False):
         response = _do_request(get_index_url(index_path))
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
-            return None
+            raise KeyError("index path {} not found".format(index_path))
         raise
     return response.json()["taskId"]

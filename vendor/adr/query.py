@@ -11,12 +11,11 @@ import jsone
 import yaml
 from loguru import logger
 
-from adr import sources, config
-from adr.context import RequestParser, extract_context_names, get_context_definitions
+from adr import config, context, sources
+from adr.context import RequestParser
 from adr.errors import MissingDataError
 from adr.formatter import all_formatters
 from adr.util.req import requests_retry_session
-from mo_times import Timer
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -81,9 +80,9 @@ def load_query_context(name, add_contexts=[]):
         query = yaml.load(fh, Loader=yaml.SafeLoader)
         # Extract query and context
         specific_contexts = query.pop("context") if "context" in query else {}
-        contexts = extract_context_names(query)
+        contexts = context.extract_context_names(query)
         contexts.update(add_contexts)
-        query_contexts = get_context_definitions(contexts, specific_contexts)
+        query_contexts = context.get_context_definitions(contexts, specific_contexts)
 
         return query_contexts
 
@@ -125,8 +124,8 @@ def run_query(name, args):
 
     key = f"run_query.{name}.{query_hash}"
     if config.cache.has(key):
-        with Timer("Loading results from cache"):
-            return config.cache.get(key)
+        logger.debug(f"Loading results from cache")
+        return config.cache.get(key)
 
     logger.trace(f"JSON representation of query:\n{query_str}")
     result = query_activedata(query_str, config.url)
@@ -176,7 +175,8 @@ def format_query(query, remainder=[]):
     :param name query: name of the query file to be run.
     :param remainder: user contexts
     """
-    fmt = all_formatters[config.fmt]
+    if isinstance(config.fmt, str):
+        fmt = all_formatters[config.fmt]
 
     query_context = load_query_context(query, ["format"])
     args = vars(RequestParser(query_context).parse_args(remainder))

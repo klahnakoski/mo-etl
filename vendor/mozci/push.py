@@ -9,7 +9,6 @@ from adr.query import run_query
 from adr.util.memoize import memoize, memoized_property
 from loguru import logger
 
-from mo_logs import Log
 from mozci.task import GroupResult, GroupSummary, LabelSummary, Status, Task, TestTask
 from mozci.util.hgmo import HGMO
 from mozci.util.taskcluster import find_task_id
@@ -22,32 +21,44 @@ MAX_DEPTH = 14
 
 
 class Push:
+    """A representation of a single push.
+
+    Args:
+        revs (list): List of revisions of commits in the push (top-most is the first element).
+        branch (str): Branch to look on (default: autoland).
+    """
+
     # static thread pool, to avoid spawning threads too often.
     THREAD_POOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor()
 
     def __init__(self, revs, branch="autoland"):
-        """A representation of a single push.
-
-        Args:
-            revs (list): List of revisions of commits in the push (top-most is the first element).
-            branch (str): Branch to look on (default: autoland).
-        """
         if isinstance(revs, str):
+            self._revs = None
             revs = [revs]
+        else:
+            self._revs = revs
 
-        self.revs = revs
         self.branch = branch
-        self._hgmo = HGMO.create(self.rev, branch=self.branch)
-        self.index = BASE_INDEX.format(branch=self.branch, rev=self.rev)
+        self._hgmo = HGMO.create(revs[0], branch=self.branch)
 
         self._id = None
         self._date = None
 
-    @property
-    def rev(self):
-        return self.revs[0]
+        # Need to use full hash in the index.
+        if len(revs[0]) == 40:
+            self.rev = revs[0]
+        else:
+            self.rev = self._hgmo["node"]
 
-    @memoize
+        self.index = BASE_INDEX.format(branch=self.branch, rev=self.rev)
+
+    @property
+    def revs(self):
+        if not self._revs:
+            self._revs = [c["node"] for c in self._hgmo.changesets]
+        return self._revs
+
+    @memoized_property
     def backedoutby(self):
         """The revision of the commit which backs out this one or None.
 
@@ -56,13 +67,14 @@ class Push:
         """
         return self._hgmo.get("backedoutby") or None
 
+    @property
     def backedout(self):
         """Whether the push was backed out or not.
 
         Returns:
             bool: True if this push was backed out.
         """
-        return bool(self.backedoutby())
+        return bool(self.backedoutby)
 
     @property
     def date(self):
@@ -102,7 +114,7 @@ class Push:
 
         return push
 
-    @memoize
+    @memoized_property
     def parent(self):
         """Returns the parent push of this push.
 
@@ -111,7 +123,7 @@ class Push:
         """
         return self.create_push(self.id - 1)
 
-    @memoize
+    @memoized_property
     def child(self):
         """Returns the child push of this push.
 
@@ -120,7 +132,7 @@ class Push:
         """
         return self.create_push(self.id + 1)
 
-    @memoize
+    @memoized_property
     def decision_task(self):
         """A representation of the decision task.
 
@@ -131,7 +143,7 @@ class Push:
         task_id = find_task_id(index)
         return Task(id=task_id)
 
-    @memoize
+    @memoized_property
     def tasks(self):
         """All tasks that ran on the push, including retriggers and backfills.
 
@@ -255,15 +267,16 @@ class Push:
 
         return [Task.create(**task) for task in normalized_tasks]
 
+    @property
     def task_labels(self):
         """The set of task labels that ran on this push.
 
         Returns:
             set: A set of task labels (str).
         """
-        return set(t.label for t in self.tasks())
+        return set(t.label for t in self.tasks)
 
-    @memoize
+    @memoized_property
     def target_task_labels(self):
         """The set of all task labels that could possibly run on this push.
 
@@ -272,7 +285,7 @@ class Push:
         """
         return set(self.decision_task.get_artifact("public/target-tasks.json"))
 
-    @memoize
+    @memoized_property
     def scheduled_task_labels(self):
         """The set of task labels that were originally scheduled to run on this push.
 
@@ -281,11 +294,8 @@ class Push:
         Returns:
             set: A set of task labels (str).
         """
-        try:
-            tasks = self.decision_task.get_artifact("public/task-graph.json").values()
-            return {t["label"] for t in tasks}
-        except Exception as e:
-            return set()
+        tasks = self.decision_task.get_artifact("public/task-graph.json").values()
+        return {t["label"] for t in tasks}
 
     @property
     def unscheduled_task_labels(self):
@@ -297,7 +307,7 @@ class Push:
         """
         return self.task_labels - self.scheduled_task_labels
 
-    @memoize
+    @memoized_property
     def group_summaries(self):
         """All group summaries combining retriggers.
 
@@ -320,7 +330,7 @@ class Push:
         groups = {group: GroupSummary(group, tasks) for group, tasks in groups.items()}
         return groups
 
-    @memoize
+    @memoized_property
     def label_summaries(self):
         """All label summaries combining retriggers.
 
@@ -328,12 +338,12 @@ class Push:
             dict: A dictionary of the form {<label>: [<LabelSummary>]}.
         """
         labels = defaultdict(list)
-        for task in self.tasks():
+        for task in self.tasks:
             labels[task.label].append(task)
         labels = {label: LabelSummary(label, tasks) for label, tasks in labels.items()}
         return labels
 
-    @memoize
+    @memoized_property
     def duration(self):
         """The total duration of all tasks that ran on the push.
 
@@ -342,7 +352,7 @@ class Push:
         """
         return int(sum(t.duration for t in self.tasks) / 3600)
 
-    @memoize
+    @memoized_property
     def scheduled_duration(self):
         """The total runtime of tasks excluding retriggers and backfills.
 
@@ -385,36 +395,36 @@ class Push:
         count = 0
         other = self
         while count < MAX_DEPTH + 1:
-            for name, summary in getattr(other, f"{runnable_type}_summaries")().items():
+            for name, summary in getattr(other, f"{runnable_type}_summaries").items():
                 if name in passing_runnables:
                     # It passed in one of the pushes between the current and its
                     # children, so it is definitely not a regression in the current.
                     continue
 
-                if summary.status() == Status.PASS:
+                if summary.status == Status.PASS:
                     passing_runnables.add(name)
                     continue
 
-                if all(c not in failclass for c, n in summary.classifications()):
+                if all(c not in failclass for c, n in summary.classifications):
                     passing_runnables.add(name)
                     continue
 
                 fixed_by_commit_classification_notes = [
                     n[:12]
-                    for c, n in summary.classifications()
+                    for c, n in summary.classifications
                     if c == "fixed by commit"
                     if n is not None
                 ]
                 if len(fixed_by_commit_classification_notes) > 0:
                     if (
-                        self.backedout()
-                        and self.backedoutby()[:12]
+                        self.backedout
+                        and self.backedoutby[:12]
                         in fixed_by_commit_classification_notes
                     ):
                         # If the failure was classified as fixed by commit, and the fixing commit
                         # is a backout of the current push, it is definitely a regression of the
                         # current push.
-                        candidate_regressions[name] = (-math.inf, summary.status())
+                        candidate_regressions[name] = (-math.inf, summary.status)
                         continue
                     elif all(
                         HGMO.create(n, branch=self.branch).is_backout
@@ -431,9 +441,9 @@ class Push:
                     # children, we don't want to increase the previous distance.
                     continue
 
-                candidate_regressions[name] = (count, summary.status())
+                candidate_regressions[name] = (count, summary.status)
 
-            other = other.child()
+            other = other.child
             count += 1
 
         return candidate_regressions
@@ -459,18 +469,18 @@ class Push:
             runnable_type
         ).items():
             count = 0
-            other = self.parent()
+            other = self.parent
             prior_regression = False
 
             while count < MAX_DEPTH:
-                runnable_summaries = getattr(other, f"{runnable_type}_summaries")()
+                runnable_summaries = getattr(other, f"{runnable_type}_summaries")
 
                 if name in runnable_summaries:
-                    if runnable_summaries[name].status() != Status.PASS:
+                    if runnable_summaries[name].status != Status.PASS:
                         prior_regression = True
                     break
 
-                other = other.parent()
+                other = other.parent
                 count += 1
 
             total_count = count + child_count
@@ -536,8 +546,6 @@ class Push:
         """
         index = self.index + ".source.shadow-scheduler-{}".format(name)
         task = Task(id=find_task_id(index))
-        if task.id==None:
-            return set()
         labels = task.get_artifact("public/shadow-scheduler/optimized_tasks.list")
         return set(labels.splitlines())
 
@@ -546,8 +554,9 @@ class Push:
 
 
 def make_push_objects(**kwargs):
-    pushes = []
     result = run_query("push_revisions", Namespace(**kwargs))
+
+    pushes = []
 
     for pushid, date, revs, parents in result["data"]:
         topmost = list(set(revs) - set(parents))[0]
@@ -568,4 +577,5 @@ def make_push_objects(**kwargs):
 
         if i != len(pushes) - 1:
             cur._child = pushes[i + 1]
+
     return pushes

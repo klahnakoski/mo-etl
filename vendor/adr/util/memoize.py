@@ -18,7 +18,7 @@ class memoize(dict):
         return self[args]
 
     def method_call(self, instance, *args):
-        name = "_cache_%s" % self.func.__name__
+        name = "_%s" % self.func.__name__
         if not hasattr(instance, name):
             setattr(instance, name, {})
         cache = getattr(instance, name)
@@ -37,6 +37,7 @@ class memoized_property(object):
 
     def __init__(self, func):
         self.func = func
+        functools.update_wrapper(self, func)
 
     def __get__(self, instance, cls):
         name = "_%s" % self.func.__name__

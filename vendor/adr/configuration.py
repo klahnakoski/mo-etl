@@ -4,11 +4,11 @@ from pathlib import Path
 
 from appdirs import user_config_dir
 from cachy import CacheManager
-from cachy.stores import NullStore
 from loguru import logger
 from tomlkit import parse
 
 import adr
+from adr.util.cache_stores import NullStore, SeededFileStore
 
 
 def merge_to(source, dest):
@@ -70,26 +70,18 @@ class Configuration(Mapping):
         "url": "https://activedata.allizom.org/query",
         "verbose": False,
     }
+    locked = False
 
     def __init__(self, path=None):
         self.path = Path(path or os.environ.get("ADR_CONFIG_PATH") or self.DEFAULT_CONFIG_PATH)
-        self._config={}
-        self.update(self.DEFAULTS)
+
+        self._config = self.DEFAULTS.copy()
         if self.path.is_file():
             with open(self.path, "r") as fh:
                 content = fh.read()
-                self.update(parse(content)["adr"])
+                self.merge(parse(content)["adr"])
         else:
             logger.warning(f"Configuration path {self.path} is not a file.")
-
-    def update(self, config):
-        """
-        Update the configuration object with new parameters
-        :param config: dict of configuration
-        """
-        for k, v in config.items():
-            if v != None:
-                self._config[k] = v
 
         self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
 
@@ -98,6 +90,8 @@ class Configuration(Mapping):
         self._config["cache"].setdefault("stores", {"null": {"driver": "null"}})
         self.cache = CacheManager(self._config["cache"])
         self.cache.extend("null", lambda driver: NullStore())
+        self.cache.extend("seeded-file", SeededFileStore)
+        self.locked = True
 
     def __len__(self):
         return len(self._config)
@@ -112,6 +106,26 @@ class Configuration(Mapping):
         if key in vars(self):
             return vars(self)[key]
         return self.__getitem__(key)
+
+    def __setattr__(self, key, value):
+        if self.locked:
+            raise AttributeError(
+                "Don't set attributes directly, use `config.set(key=value)` instead."
+            )
+        super(Configuration, self).__setattr__(key, value)
+
+    def set(self, **kwargs):
+        """Set data on the config object."""
+        self._config.update(kwargs)
+
+    def merge(self, other):
+        """Merge data into config (updates dicts and lists instead of
+        overwriting them).
+
+        Args:
+            other (dict): Dictionary to merge configuration with.
+        """
+        merge_to(other, self._config)
 
     def dump(self):
         return "\n".join(flatten(self._config))
