@@ -22,7 +22,7 @@ from jx_python import jx
 from mo_dots import Data, coalesce, listwrap, wrap, set_default
 from mo_future import text
 from mo_logs import startup, constants, Log, machine_metadata
-from mo_threads import Queue, Thread, MAIN_THREAD, THREAD_STOP, Lock
+from mo_threads import Queue
 from mo_times import Date, Duration, Timer
 from mozci.push import make_push_objects
 from mozci.task import Status
@@ -44,125 +44,6 @@ def normalize_config(config):
         config.destination
     )
     return config
-
-
-def process(config, please_stop):
-    todo = Queue("work", max=10000)
-
-    etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
-        "etl-range"
-    )
-    data = wrap(etl_config_table.query()).data
-    prev_done = data[0]
-    done = Data(
-        min=Date(coalesce(prev_done.min, config.start, DEFAULT_START)),
-        max=Date(coalesce(prev_done.max, config.start, DEFAULT_START)),
-    )
-    if not len(data):
-        etl_config_table.add(done)
-
-    if done.max < config.range.max:
-        # ADD WORK GOING FORWARDS
-        start = Date.floor(done.max, config.interval)
-        while start < config.range.max:
-            end = start + config.interval
-            for branch in config.branches:
-                for sched in config.schedulers:
-                    todo.add((start, end, branch, sched))
-            start = end
-    if config.range.min < done.min:
-        # ADD WORK GOING BACKWARDS
-        end = Date.ceiling(done.min, config.interval)
-        while config.range.min < end:
-            start = end - config.interval
-            for branch in config.branches:
-                for sched in config.schedulers:
-                    todo.add((start, end, branch, sched))
-            end = start
-
-    def process_one(start, end, branch, scheduler):
-        # ASSUME PREVIOUS WORK IS DONE
-        # UPDATE THE DATABASE STATE
-        done.min = mo_math.min(end, done.min)
-        done.max = mo_math.max(start, done.max)
-        etl_config_table.update({"set": done})
-
-        # compute dates in range
-        try:
-            pushes = make_push_objects(
-                from_date=start.format(), to_date=end.format(), branch=branch
-            )
-        except MissingDataError:
-            pushes = []
-        except Exception as e:
-            raise Log.error("not expected", cause=e)
-
-        Log.note(
-            "Found {{num}} pushes for {{scheduler}} on {{branch}} in ({{start}}, {{end}})",
-            num=len(pushes),
-            start=start,
-            end=end,
-            scheduler=scheduler,
-            branch=branch,
-        )
-        data = []
-        for push in pushes:
-            tasks = push.get_shadow_scheduler_tasks(scheduler)
-            likely_regressions = push.get_likely_regressions("label")
-            backout_by = push.backedoutby()
-            candidate_regressions = [
-                {
-                    "name": name,
-                    "child_count": child_count,
-                    "status": {
-                        Status.PASS: "pass",
-                        Status.FAIL: "fail",
-                        Status.INTERMITTENT: "intermittent",
-                    }[status],
-                }
-                for name, (child_count, status) in push.get_candidate_regressions(
-                    "label"
-                ).items()
-            ]
-            backout_type = None
-            if backout_by:
-                if likely_regressions & tasks:
-                    backout_type = "primary"
-                else:
-                    backout_type = "secondary"
-
-            data.append(
-                {
-                    "push": {
-                        "id": push.id,
-                        "date": push.date,
-                        "changesets": push.revs,
-                    },
-                    "tasks": jx.sort(tasks),
-                    "likely_regressions": jx.sort(likely_regressions),
-                    "candidate_regressions": jx.sort(candidate_regressions, "name"),
-                    "scheduler": scheduler,
-                    "branch": branch,
-                    "backout_type": backout_type,
-                    "backout_by": backout_by,
-                    "etl": {"version": git.get_revision(), "timestamp": Date.now()},
-                }
-            )
-        Log.note("adding {{num}} records to bigquery", num=len(data))
-        config._destination.extend(data)
-
-    try:
-        while not please_stop:
-            try:
-                start, end, branch, scheduler = todo.pop_one()
-            except Exception:
-                Log.note("no more work")
-                break
-            process_one(start, end, branch, scheduler)
-    except Exception as e:
-        Log.warning("Could not complete the etl", cause=e)
-
-    config._destination.merge_shards()
 
 
 def all_pushes(config):
@@ -248,7 +129,7 @@ def all_pushes(config):
         for push in pushes:
             # RECORD THE PUSH
             backout_hash = push.backedoutby()
-            with Timer("get tasks for push {{push}}", {"push":push.id}):
+            with Timer("get tasks for push {{push}}", {"push": push.id}):
                 tasks = {
                     s: jx.sort(push.get_shadow_scheduler_tasks(s))
                     for s in config.schedulers

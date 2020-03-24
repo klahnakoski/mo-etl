@@ -609,13 +609,13 @@ class Table(Facts):
 
         self.container.query_and_wait(
             ConcatSQL(
-                SQL(
+                SQL(  # SOME KEYWORDS: ROWNUM RANK
                     "SELECT * EXCEPT (_rank) FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY "
                 ),
                 partition,
                 SQL_ORDERBY,
                 order_by,
-                SQL(" AS _rank FROM "),
+                SQL(") AS _rank FROM "),
                 quote_column(self.full_name),
                 SQL(") a WHERE _rank=1"),
             )

@@ -2,8 +2,8 @@
   "start": "today-2day",
   "interval": "6hour",
   "range": {
-    "min": "today-week",
-    "max": "today"
+    "min": "today-3week",
+    "max": "today-4day"
   },
   "branches": "autoland",
   "schedulers": [
@@ -64,7 +64,7 @@
     "sharded": true
   },
   "adr": {
-    "verbose": 1,
+    "verbose": 0,
     "url": "https://activedata.allizom.org/query",
     "cache": {
       "retention": 10080,
