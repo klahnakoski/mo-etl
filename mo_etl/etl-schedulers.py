@@ -24,7 +24,6 @@ from jx_bigquery import bigquery
 from jx_python import jx
 from mo_dots import Data, coalesce, listwrap, wrap
 from mo_logs import startup, constants, Log, machine_metadata
-from mo_threads import Queue
 from mo_times import Date, Duration, Timer
 from mozci.push import make_push_objects
 from pyLibrary.env import git
@@ -47,28 +46,28 @@ def normalize_config(config):
     return config
 
 
-def all_pushes(config):
-    todo = Queue("work", max=10000)
+def process(config):
 
     etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
         "etl-range"
     )
-    data = wrap(etl_config_table.query()).data
-    prev_done = data[0]
+    done_result = wrap(etl_config_table.query()).data
+    prev_done = done_result[0]
     done = Data(
         min=Date(coalesce(prev_done.min, config.start, "today-2day")),
         max=Date(coalesce(prev_done.max, config.start, "today-2day")),
     )
-    if not len(data):
+    if not len(done_result):
         etl_config_table.add(done)
 
+    todo = []
     if done.max < config.range.max:
         # ADD WORK GOING FORWARDS
         start = Date.floor(done.max, config.interval)
         while start < config.range.max:
             end = start + config.interval
             for branch in config.branches:
-                todo.add((start, end, branch))
+                todo.append((start, end, branch))
             start = end
     if config.range.min < done.min:
         # ADD WORK GOING BACKWARDS
@@ -76,7 +75,7 @@ def all_pushes(config):
         while config.range.min < end:
             start = end - config.interval
             for branch in config.branches:
-                todo.add((start, end, branch))
+                todo.append((start, end, branch))
             end = start
 
     def process_one(start, end, branch):
@@ -88,9 +87,7 @@ def all_pushes(config):
 
         try:
             pushes = make_push_objects(
-                from_date=start.format(),
-                to_date=end.format(),
-                branch=branch
+                from_date=start.format(), to_date=end.format(), branch=branch
             )
         except MissingDataError:
             return
@@ -105,24 +102,19 @@ def all_pushes(config):
             branch=branch,
         )
 
-        for push in pushes:
-            # RECORD THE PUSH
-            backout_hash = push.backedoutby
-            with Timer("get tasks for push {{push}}", {"push": push.id}):
-                tasks = {}
-                for s in config.schedulers:
-                    try:
-                        tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
-                    except Exception:
-                        pass
+        data = []
+        try:
+            for push in pushes:
+                # RECORD THE PUSH
+                with Timer("get tasks for push {{push}}", {"push": push.id}):
+                    tasks = {}
+                    for s in config.schedulers:
+                        try:
+                            tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
+                        except Exception:
+                            pass
 
-                regressed_labels = set()
-                if backout_hash:
-                    with Timer("find regressed labels for {{push}}", {"push": push.id}):
-                        end = push
-                        while backout_hash not in end.revs:
-                            regressed_labels |= end.get_regressions("label").keys()
-                            end = end.child
+                regressions = push.get_regressions("label").keys()
 
                 data.append(
                     {
@@ -132,22 +124,22 @@ def all_pushes(config):
                             "changesets": push.revs,
                         },
                         "tasks": tasks,
-                        "indicators": [{"label": name} for name in jx.sort(regressed_labels)],
+                        "indicators": [
+                            {"label": name} for name in jx.sort(regressions)
+                        ],
                         "branch": branch,
-                        "etl": {"version": git.get_revision(), "timestamp": Date.now()},
+                        "etl": {
+                            "revision": git.get_revision(),
+                            "timestamp": Date.now(),
+                        },
                     }
                 )
-
-        Log.note("adding {{num}} records to bigquery", num=len(data))
-        config._destination.extend(data)
+        finally:
+            with Timer("adding {{num}} records to bigquery", {"num": len(data)}):
+                config._destination.extend(data)
 
     try:
-        while True:
-            try:
-                start, end, branch = todo.pop_one()
-            except Exception:
-                Log.note("no more work")
-                break
+        for start, end, branch in todo:
             process_one(start, end, branch)
     except Exception as e:
         Log.warning("Could not complete the etl", cause=e)
@@ -161,6 +153,7 @@ def main():
         constants.set(config.constants)
 
         with Timer("Add update() method to Configuration class"):
+
             def update(self, config):
                 """
                 Update the configuration object with new parameters
@@ -170,13 +163,16 @@ def main():
                     if v != None:
                         self._config[k] = v
 
-                self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
+                self._config["sources"] = sorted(
+                    map(os.path.expanduser, set(self._config["sources"]))
+                )
 
                 # Use the NullStore by default. This allows us to control whether
                 # caching is enabled or not at runtime.
                 self._config["cache"].setdefault("stores", {"null": {"driver": "null"}})
                 object.__setattr__(self, "cache", CacheManager(self._config["cache"]))
                 self.cache.extend("null", lambda driver: NullStore())
+
             setattr(Configuration, "update", update)
 
         # UPDATE ADR COFIGURATION
@@ -192,7 +188,7 @@ def main():
         )
 
         config = normalize_config(config)
-        all_pushes(config)
+        process(config)
     except Exception as e:
         Log.warning("Problem with etl! Shutting down.", cause=e)
     finally:
