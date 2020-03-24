@@ -89,24 +89,12 @@ def all_pushes(config):
         done.max = mo_math.max(start, done.max)
         etl_config_table.update({"set": done})
 
-        # WE REQUIRE SOME EXTRA PUSHES TO CALCULATE STATS
-        extra = []
         try:
             pushes = make_push_objects(
-                from_date=start.format(), to_date=end.format(), branch=branch
+                from_date=start.format(),
+                to_date=end.format(),
+                branch=branch
             )
-            start = pushes[0]
-            end = pushes[-1]
-            for i in range(LOOK_BACK):
-                start = start.parent()
-                extra.append(start)
-            for i in range(LOOK_FORWARD):
-                try:
-                    end = end.child()
-                except Exception as e:
-                    # WE DO NOT HAVE ENOUGH DATA YET
-                    raise e
-                extra.append(end)
         except MissingDataError:
             pushes = []
         except Exception as e:
@@ -115,92 +103,29 @@ def all_pushes(config):
         Log.note(
             "Found {{num}} pushes on {{branch}} in ({{start}}, {{end}})",
             num=len(pushes),
-            start=start.id,
-            end=end.id,
+            start=start,
+            end=end,
             branch=branch,
         )
 
-        data = []
-        labels = set()
-        results = Data()
-
-        with Timer("accumulate label stats for all pushes"):
-            for push in extra + pushes:
-                labels |= push.label_summaries().keys()
-                for name, summary in push.label_summaries().items():
-                    results[name][text(push.id)][summary.status().name] += 1
-        labels = jx.sort(labels)
-
         for push in pushes:
             # RECORD THE PUSH
-            backout_hash = push.backedoutby()
+            backout_hash = push.backedoutby
             with Timer("get tasks for push {{push}}", {"push": push.id}):
-                tasks = {
-                    s: jx.sort(push.get_shadow_scheduler_tasks(s))
-                    for s in config.schedulers
-                }
-                if not backout_hash:
-                    data.append(
-                        {
-                            "push": {
-                                "id": push.id,
-                                "date": push.date,
-                                "changesets": push.revs,
-                            },
-                            "tasks": tasks,
-                            "branch": branch,
-                            "etl": {"version": git.get_revision(), "timestamp": Date.now()},
-                        }
-                    )
-                    continue
+                tasks = {}
+                for s in config.schedulers:
+                    try:
+                        tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
+                    except Exception:
+                        pass
 
-            regressed_labels = set()
-            with Timer("find regressed labels for {{push}}", {"push": push.id}):
-                while backout_hash not in end.revs:
-                    regressed_labels |= end.get_regressions.keys()
-                    end = end.child()
-
-            # ENSURE WE HAVE THE PUSH SEQUENCE COVERING (start, bad, backout, end)
-            # sequence = before + during + after
-            indicators = []
-            start = bad = end = push
-            with Timer("find indicators for {{push}}", {"push": push.id}):
-
-                before = []
-                during = []
-                after = []
-                for i in range(LOOK_BACK):
-                    start = start.parent()
-                    before.append(text(start.id))
-                while backout_hash not in end.revs:
-                    during.append(text(end.id))
-                    end = end.child()
-                for i in range(LOOK_FORWARD):
-                    after.append(text(end.id))
-                    end = end.child()
-
-                parts = Data(before=before, during=during, after=after)
-
-                for label in labels:
-                    sequence = results[label]
-
-                    about = Data()
-                    for p in ("before", "during", "after"):
-                        for s in Status:
-                            about[p][s.name] = mo_math.SUM(
-                                sequence[i][s.name] for i in parts[p]
-                            )
-
-                    # IS THIS LABEL AN INDICATOR?
-                    if (
-                        coalesce(about.before.PASS, 0)
-                        > coalesce(about.before.FAIL, 0)  # SUCCESS BEFORE BAD PUSH
-                        and coalesce(about.during.PASS, 0)
-                        < coalesce(about.during.FAIL, 0)  # FAILURE DURING BAD PUSH
-                        and coalesce(about.after.PASS, 0)
-                        > coalesce(about.after.FAIL, 0)  # SUCCESS AFTER BACKOUT
-                    ):
-                        indicators.append(set_default({"label": label}, about))
+                regressed_labels = set()
+                if backout_hash:
+                    with Timer("find regressed labels for {{push}}", {"push": push.id}):
+                        end = push
+                        while backout_hash not in end.revs:
+                            regressed_labels |= end.get_regressions("label").keys()
+                            end = end.child
 
                 data.append(
                     {
@@ -210,8 +135,7 @@ def all_pushes(config):
                             "changesets": push.revs,
                         },
                         "tasks": tasks,
-                        "indicators": indicators,
-                        "regressed_labels": regressed_labels,
+                        "indicators": [{"label": name} for name in jx.sort(regressed_labels)],
                         "branch": branch,
                         "etl": {"version": git.get_revision(), "timestamp": Date.now()},
                     }
