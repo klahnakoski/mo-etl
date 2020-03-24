@@ -10,7 +10,6 @@ from __future__ import division
 from __future__ import unicode_literals
 
 import os
-from copy import copy
 
 import loguru
 from cachy import CacheManager
@@ -23,13 +22,11 @@ from adr.configuration import Configuration
 from adr.errors import MissingDataError
 from jx_bigquery import bigquery
 from jx_python import jx
-from mo_dots import Data, coalesce, listwrap, wrap, set_default
-from mo_future import text
+from mo_dots import Data, coalesce, listwrap, wrap
 from mo_logs import startup, constants, Log, machine_metadata
 from mo_threads import Queue
 from mo_times import Date, Duration, Timer
 from mozci.push import make_push_objects
-from mozci.task import Status
 from pyLibrary.env import git
 
 DEFAULT_START = "today-2day"
@@ -96,7 +93,7 @@ def all_pushes(config):
                 branch=branch
             )
         except MissingDataError:
-            pushes = []
+            return
         except Exception as e:
             raise Log.error("not expected", cause=e)
 
@@ -163,26 +160,29 @@ def main():
         config = startup.read_settings()
         constants.set(config.constants)
 
-        # ADD CONFIGURATION INJECTOR
-        def update(self, config):
-            """
-            Update the configuration object with new parameters
-            :param config: dict of configuration
-            """
-            for k, v in config.items():
-                if v != None:
-                    self._config[k] = v
+        with Timer("Add update() method to Configuration class"):
+            def update(self, config):
+                """
+                Update the configuration object with new parameters
+                :param config: dict of configuration
+                """
+                for k, v in config.items():
+                    if v != None:
+                        self._config[k] = v
 
-            self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
+                self._config["sources"] = sorted(map(os.path.expanduser, set(self._config["sources"])))
 
-            # Use the NullStore by default. This allows us to control whether
-            # caching is enabled or not at runtime.
-            self._config["cache"].setdefault("stores", {"null": {"driver": "null"}})
-            object.__setattr__(self, "cache", CacheManager(self._config["cache"]))
-            self.cache.extend("null", lambda driver: NullStore())
-        setattr(Configuration, "update", update)
+                # Use the NullStore by default. This allows us to control whether
+                # caching is enabled or not at runtime.
+                self._config["cache"].setdefault("stores", {"null": {"driver": "null"}})
+                object.__setattr__(self, "cache", CacheManager(self._config["cache"]))
+                self.cache.extend("null", lambda driver: NullStore())
+            setattr(Configuration, "update", update)
 
+        # UPDATE ADR COFIGURATION
         adr.config.update(config.adr)
+
+        Log.start(config.debug)
 
         # SHUNT ADR LOGGING TO MAIN LOGGING
         # https://loguru.readthedocs.io/en/stable/api/logger.html#loguru._logger.Logger.add
@@ -190,7 +190,7 @@ def main():
         loguru.logger.add(
             _logging, level="DEBUG", format="{message}", filter=lambda r: True,
         )
-        Log.start(config.debug)
+
         config = normalize_config(config)
         all_pushes(config)
     except Exception as e:
