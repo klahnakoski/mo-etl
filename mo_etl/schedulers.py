@@ -33,57 +33,37 @@ LOOK_BACK = 30
 LOOK_FORWARD = 30
 
 
-def normalize_config(config):
-    config.range.min = Date(config.range.min)
-    config.range.max = Date(config.range.max)
-    config.start = Date(config.start)
-    config.interval = Duration(config.interval)
-    config.branches = listwrap(config.branches)
-    config.schedulers = listwrap(config.schedulers)
-    config._destination = bigquery.Dataset(config.destination).get_or_create_table(
-        config.destination
-    )
-    return config
+class Schedulers:
+    def __init__(self, config):
+        self.config = config = wrap(config)
+        config.range.min = Date(config.range.min)
+        config.range.max = Date(config.range.max)
+        config.start = Date(config.start)
+        config.interval = Duration(config.interval)
+        config.branches = listwrap(config.branches)
+        config.schedulers = listwrap(config.schedulers)
+        self.destination = bigquery.Dataset(config.destination).get_or_create_table(
+            config.destination
+        )
 
+        self.etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
+            "etl-range"
+        )
+        done_result = wrap(self.etl_config_table.query()).data
+        prev_done = done_result[0]
+        self.done = Data(
+            min=Date(coalesce(prev_done.min, config.start, "today-2day")),
+            max=Date(coalesce(prev_done.max, config.start, "today-2day")),
+        )
+        if not len(done_result):
+            self.etl_config_table.add(self.done)
 
-def process(config):
-
-    etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
-        "etl-range"
-    )
-    done_result = wrap(etl_config_table.query()).data
-    prev_done = done_result[0]
-    done = Data(
-        min=Date(coalesce(prev_done.min, config.start, "today-2day")),
-        max=Date(coalesce(prev_done.max, config.start, "today-2day")),
-    )
-    if not len(done_result):
-        etl_config_table.add(done)
-
-    todo = []
-    if done.max < config.range.max:
-        # ADD WORK GOING FORWARDS
-        start = Date.floor(done.max, config.interval)
-        while start < config.range.max:
-            end = start + config.interval
-            for branch in config.branches:
-                todo.append((start, end, branch))
-            start = end
-    if config.range.min < done.min:
-        # ADD WORK GOING BACKWARDS
-        end = Date.ceiling(done.min, config.interval)
-        while config.range.min < end:
-            start = end - config.interval
-            for branch in config.branches:
-                todo.append((start, end, branch))
-            end = start
-
-    def process_one(start, end, branch):
+    def process_one(self, start, end, branch):
         # ASSUME PREVIOUS WORK IS DONE
         # UPDATE THE DATABASE STATE
-        done.min = mo_math.min(end, done.min)
-        done.max = mo_math.max(start, done.max)
-        etl_config_table.update({"set": done})
+        self.done.min = mo_math.min(end, self.done.min)
+        self.done.max = mo_math.max(start, self.done.max)
+        self.etl_config_table.update({"set": self.done})
 
         try:
             pushes = make_push_objects(
@@ -105,10 +85,9 @@ def process(config):
         data = []
         try:
             for push in pushes:
-                # RECORD THE PUSH
                 with Timer("get tasks for push {{push}}", {"push": push.id}):
                     tasks = {}
-                    for s in config.schedulers:
+                    for s in self.config.schedulers:
                         try:
                             tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
                         except Exception:
@@ -116,6 +95,7 @@ def process(config):
 
                 regressions = push.get_regressions("label").keys()
 
+                # RECORD THE PUSH
                 data.append(
                     {
                         "push": {
@@ -135,16 +115,40 @@ def process(config):
                     }
                 )
         finally:
+            # ADD WHATEVER WE HAVE
             with Timer("adding {{num}} records to bigquery", {"num": len(data)}):
-                config._destination.extend(data)
+                self.destination.extend(data)
 
-    try:
-        for start, end, branch in todo:
-            process_one(start, end, branch)
-    except Exception as e:
-        Log.warning("Could not complete the etl", cause=e)
-    else:
-        config._destination.merge_shards()
+    def process(self):
+        done = self.done
+        config = self.config
+
+        # ADD CHUNKS OF WORK
+        self.todo = []
+        if done.max < config.range.max:
+            # ADD WORK GOING FORWARDS
+            start = Date.floor(done.max, config.interval)
+            while start < config.range.max:
+                end = start + config.interval
+                for branch in config.branches:
+                    self.todo.append((start, end, branch))
+                start = end
+        if config.range.min < done.min:
+            # ADD WORK GOING BACKWARDS
+            end = Date.ceiling(done.min, config.interval)
+            while config.range.min < end:
+                start = end - config.interval
+                for branch in config.branches:
+                    self.todo.append((start, end, branch))
+                end = start
+
+        try:
+            for start, end, branch in self.todo:
+                self.process_one(start, end, branch)
+        except Exception as e:
+            Log.warning("Could not complete the etl", cause=e)
+        else:
+            self.destination.merge_shards()
 
 
 def main():
@@ -187,8 +191,7 @@ def main():
             _logging, level="DEBUG", format="{message}", filter=lambda r: True,
         )
 
-        config = normalize_config(config)
-        process(config)
+        Schedulers(config).process()
     except Exception as e:
         Log.warning("Problem with etl! Shutting down.", cause=e)
     finally:
