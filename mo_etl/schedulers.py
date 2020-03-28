@@ -102,6 +102,7 @@ class Schedulers:
                             "id": push.id,
                             "date": push.date,
                             "changesets": push.revs,
+                            "backedoutby": push.backedoutby,
                         },
                         "tasks": tasks,
                         "indicators": [
