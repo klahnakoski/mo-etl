@@ -18,12 +18,14 @@ from cachy.stores import NullStore
 import adr
 import jx_sqlite
 import mo_math
+import mozci
 from adr.configuration import Configuration
 from adr.errors import MissingDataError
 from jx_bigquery import bigquery
 from jx_python import jx
 from mo_dots import Data, coalesce, listwrap, wrap
 from mo_logs import startup, constants, Log, machine_metadata
+from mo_threads import Process
 from mo_times import Date, Duration, Timer
 from mozci.push import make_push_objects
 from pyLibrary.env import git
@@ -46,17 +48,33 @@ class Schedulers:
             config.destination
         )
 
-        self.etl_config_table = jx_sqlite.Container(config.config_db).get_or_create_facts(
-            "etl-range"
-        )
+        # CALCULATE THE PREVIOUS RUN
+        mozci_version = self.version("mozci")
+        self.etl_config_table = jx_sqlite.Container(
+            config.config_db
+        ).get_or_create_facts("etl-range")
         done_result = wrap(self.etl_config_table.query()).data
         prev_done = done_result[0]
-        self.done = Data(
-            min=Date(coalesce(prev_done.min, config.start, "today-2day")),
-            max=Date(coalesce(prev_done.max, config.start, "today-2day")),
-        )
-        if not len(done_result):
+        if len(done_result) and prev_done.mozci_version == mozci_version:
+            self.done = Data(
+                mozci_version=mozci_version,
+                min=Date(coalesce(prev_done.min, config.start, "today-2day")),
+                max=Date(coalesce(prev_done.max, config.start, "today-2day")),
+            )
+        else:
+            self.done = Data(
+                mozci_version=mozci_version,
+                min=Date(coalesce(config.start, "today-2day")),
+                max=Date(coalesce(config.start, "today-2day")),
+            )
             self.etl_config_table.add(self.done)
+
+    def version(self, package):
+        with Process("", ["pip", "show", package]) as p:
+            for line in p.stdout:
+                if line.lower().startswith("version: "):
+                    return line[9:].strip()
+            return None
 
     def process_one(self, start, end, branch):
         # ASSUME PREVIOUS WORK IS DONE
