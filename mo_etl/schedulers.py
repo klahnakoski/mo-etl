@@ -110,8 +110,11 @@ class Schedulers:
                             tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
                         except Exception:
                             pass
-
-                regressions = push.get_regressions("label").keys()
+                try:
+                    regressions = push.get_regressions("label").keys()
+                except Exception as e:
+                    regressions = []
+                    Log.warning("could not get regressions for {{push}}", push=push.id, cause=e)
 
                 # RECORD THE PUSH
                 data.append(
