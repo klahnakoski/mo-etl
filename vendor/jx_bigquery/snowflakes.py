@@ -153,7 +153,7 @@ class Snowflake(jx_base.Snowflake):
             self._columns = columns
 
             self._top_level_fields = OrderedDict()  # FORCE ORDERING FAILURE
-            for path, field in wrap(self.top_level_fields).leaves():
+            for path, field in jx.sort(wrap(self.top_level_fields).leaves(), 0):
                 leaves = self.leaves(path)
                 if not leaves:
                     continue

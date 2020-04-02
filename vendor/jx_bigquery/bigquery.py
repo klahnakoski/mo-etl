@@ -221,16 +221,15 @@ class Dataset(Container):
         )
 
     def create_view(self, view_api_name, shard_api_name):
-        job = self.query_and_wait(
-            ConcatSQL(
-                SQL("CREATE VIEW\n"),
-                quote_column(view_api_name),
-                SQL_AS,
-                sql_query({"from": shard_api_name}),
-            )
+        sql = ConcatSQL(
+            SQL("CREATE VIEW\n"),
+            quote_column(view_api_name),
+            SQL_AS,
+            sql_query({"from": shard_api_name}),
         )
+        job = self.query_and_wait(sql)
         if job.errors:
-            Log.error("Can not create view\n{{errors|json|indent}}", errors=job.errors)
+            Log.error("Can not create view\n{{sql}}\n{{errors|json|indent}}", sql=sql, errors=job.errors)
         pass
 
     def query_and_wait(self, sql):
@@ -417,6 +416,8 @@ class Table(Facts):
                 Log.note("{{num}} rows added", num=len(output))
         except Exception as e:
             e = Except.wrap(e)
+            if "Your client has issued a malformed or illegal request." in e:
+                Log.error("big query complains about {{data|json}}", data=output)
             if len(rows) > 1 and "Request payload size exceeds the limit" in e:
                 # TRY A SMALLER BATCH
                 cut = len(rows) // 2
