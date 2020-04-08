@@ -43,7 +43,6 @@ class Schedulers:
         config.start = Date(config.start)
         config.interval = Duration(config.interval)
         config.branches = listwrap(config.branches)
-        config.schedulers = listwrap(config.schedulers)
         self.destination = bigquery.Dataset(config.destination).get_or_create_table(
             config.destination
         )
@@ -105,16 +104,15 @@ class Schedulers:
             for push in pushes:
                 with Timer("get tasks for push {{push}}", {"push": push.id}):
                     tasks = {}
-                    for s in self.config.schedulers:
-                        try:
-                            tasks[s] = jx.sort(push.get_shadow_scheduler_tasks(s))
-                        except Exception:
-                            pass
+                    for s, sched_tasks in push.generate_all_shadow_scheduler_tasks():
+                        tasks[s] = jx.sort(sched_tasks)
                 try:
                     regressions = push.get_regressions("label").keys()
                 except Exception as e:
                     regressions = []
-                    Log.warning("could not get regressions for {{push}}", push=push.id, cause=e)
+                    Log.warning(
+                        "could not get regressions for {{push}}", push=push.id, cause=e
+                    )
 
                 # RECORD THE PUSH
                 data.append(
