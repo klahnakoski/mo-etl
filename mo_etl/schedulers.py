@@ -103,9 +103,17 @@ class Schedulers:
         try:
             for push in pushes:
                 with Timer("get tasks for push {{push}}", {"push": push.id}):
-                    tasks = {}
-                    for s, sched_tasks in push.generate_all_shadow_scheduler_tasks():
-                        tasks[s] = jx.sort(sched_tasks)
+                    schedulers = [
+                        label.split("shadow-scheduler-")[1]
+                        for label in push.scheduled_task_labels
+                        if "shadow-scheduler" in label
+                    ]
+                    scheduler = []
+                    for s in schedulers:
+                        try:
+                            scheduler.append({"name": s, "tasks": jx.sort(push.get_shadow_scheduler_tasks(s))})
+                        except Exception:
+                            pass
                 try:
                     regressions = push.get_regressions("label").keys()
                 except Exception as e:
@@ -123,8 +131,8 @@ class Schedulers:
                             "changesets": push.revs,
                             "backedoutby": push.backedoutby,
                         },
-                        "tasks": tasks,
-                        "indicators": [
+                        "schedulers": scheduler,
+                        "regressions": [
                             {"label": name} for name in jx.sort(regressions)
                         ],
                         "branch": branch,
