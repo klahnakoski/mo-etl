@@ -68,6 +68,29 @@ MAX_MERGE = 10  # MAXIMUM NUMBER OF TABLES TO MERGE AT ONCE
 SUFFIX_PATTERN = re.compile(r"__\w{20}")
 
 
+def connect(account_info):
+    creds = service_account.Credentials.from_service_account_info(info=account_info)
+    client = bigquery.Client(project=account_info.project_id, credentials=creds)
+    return client
+
+
+def create_dataset(project_id, dataset, client):
+    full_name = ApiName(project_id) + escape_name(dataset)
+
+    _dataset = bigquery.Dataset(text(full_name))
+    _dataset.location = "US"
+    return client.create_dataset(_dataset)
+
+
+def find_dataset(dataset, client):
+    esc_name = escape_name(dataset)
+
+    datasets = list(client.list_datasets())
+    for _dataset in datasets:
+        if ApiName(_dataset.dataset_id) == esc_name:
+            return _dataset.reference
+
+
 class Dataset(Container):
     """
     REPRESENT A BIGQUERY DATASET; aka A CONTAINER FOR TABLES; aka A DATABASE
@@ -75,23 +98,14 @@ class Dataset(Container):
 
     @override
     def __init__(self, dataset, account_info, kwargs):
-        creds = service_account.Credentials.from_service_account_info(info=account_info)
-        self.client = bigquery.Client(
-            project=account_info.project_id, credentials=creds
-        )
+        self.client = connect(account_info)
         self.short_name = dataset
         esc_name = escape_name(dataset)
         self.full_name = ApiName(account_info.project_id) + esc_name
 
-        datasets = list(self.client.list_datasets())
-        for _dataset in datasets:
-            if ApiName(_dataset.dataset_id) == esc_name:
-                self.dataset = _dataset.reference
-                break
-        else:
-            _dataset = bigquery.Dataset(text(self.full_name))
-            _dataset.location = "US"
-            self.dataset = self.client.create_dataset(_dataset)
+        self.dataset = find_dataset(dataset, self.client)
+        if not self.dataset:
+            self.dataset = create_dataset(account_info.project_id, dataset, self.client)
 
     @override
     def get_or_create_table(
@@ -229,7 +243,11 @@ class Dataset(Container):
         )
         job = self.query_and_wait(sql)
         if job.errors:
-            Log.error("Can not create view\n{{sql}}\n{{errors|json|indent}}", sql=sql, errors=job.errors)
+            Log.error(
+                "Can not create view\n{{sql}}\n{{errors|json|indent}}",
+                sql=sql,
+                errors=job.errors,
+            )
         pass
 
     def query_and_wait(self, sql):
@@ -298,9 +316,10 @@ class Table(Facts):
                 Log.error("Sharded tables require a view")
             current_view = container.client.get_table(text(self.full_name))
             view_sql = current_view.view_query
+            shard_name = _extract_primary_shard_name(view_sql)
             try:
                 self.shard = container.client.get_table(
-                    text(container.full_name + _extract_primary_shard_name(view_sql))
+                    text(container.full_name + shard_name)
                 )
                 self._flake = Snowflake.parse(
                     alias_view.schema,
@@ -309,15 +328,22 @@ class Table(Facts):
                     partition,
                 )
             except Exception as e:
-                Log.warning("view is invalid", cause=e)
+                Log.warning("view {{name}} is invalid", name=shard_name, cause=e)
                 self._flake = Snowflake.parse(
                     alias_view.schema,
                     text(self.full_name),
                     self.top_level_fields,
                     partition,
                 )
+                # REMOVE STALE VIEW
+                container.client.delete_table(current_view)
+
+                # MAKE NEW VIEW POINTING TO NEW SHARD
                 self._create_new_shard()
-                container.create_view(self.full_name, ApiName(self.shard.table_id))
+                container.create_view(
+                    self.full_name,
+                    self.container.full_name + ApiName(self.shard.table_id),
+                )
 
         self.last_extend = Date.now() - EXTEND_LIMIT
 
@@ -329,11 +355,16 @@ class Table(Facts):
         sql = sql_query({"from": self.full_name})
         query_job = self.container.client.query(text(sql))
 
+        # WE WILL REACH INTO THE _flake, SINCE THIS IS THE FIRST PLACE WE ARE ACTUALLY PULLING RECORDS OUT
+        # TODO: WITH MORE CODE THIS LOGIC GOES ELSEWHERE
+        _ = self._flake.columns  # ENSURE schema HAS BEEN PROCESSED
         if not self._flake._top_level_fields.keys():
             for row in query_job:
                 yield untyped(dict(row))
         else:
-            top2deep = {name: path for path, name in self._flake._top_level_fields.items()}
+            top2deep = {
+                name: path for path, name in self._flake._top_level_fields.items()
+            }
             for row in query_job:
                 output = {}
                 doc = dict(row)
@@ -364,7 +395,7 @@ class Table(Facts):
     def extend(self, rows):
         if self.read_only:
             Log.error("not for writing")
-        if len(rows)==0:
+        if len(rows) == 0:
             return
 
         try:

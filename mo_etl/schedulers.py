@@ -11,23 +11,22 @@ from __future__ import unicode_literals
 
 import os
 
-import loguru
-from cachy import CacheManager
-from cachy.stores import NullStore
-
 import adr
-import jx_sqlite
-import mo_math
-import mozci
+import loguru
 from adr.configuration import Configuration
 from adr.errors import MissingDataError
+from cachy import CacheManager
+from cachy.stores import NullStore
+from mozci.push import make_push_objects
+
+import jx_sqlite
+import mo_math
 from jx_bigquery import bigquery
 from jx_python import jx
 from mo_dots import Data, coalesce, listwrap, wrap
 from mo_logs import startup, constants, Log, machine_metadata
 from mo_threads import Process
 from mo_times import Date, Duration, Timer
-from mozci.push import make_push_objects
 from pyLibrary.env import git
 
 DEFAULT_START = "today-2day"
