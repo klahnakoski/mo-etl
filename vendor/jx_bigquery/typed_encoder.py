@@ -28,7 +28,7 @@ from mo_json import (
     INTERVAL,
     TIME,
 )
-from mo_logs import Log
+from mo_logs import Log, Except
 from mo_times.dates import parse
 
 ALLOWED = string.ascii_letters + string.digits
@@ -122,10 +122,14 @@ def _typed_encode(value, schema):
                 expected_type=schema,
             )
         return v, None, False
-    elif value is None:
+    elif value == None:
         return {text(escape_name(t)): None for t, child_schema in schema.items()} or None, None, False
     else:
-        v, inserter_type, json_type = schema_type(value)
+        try:
+            v, inserter_type, json_type = schema_type(value)
+        except Exception as e:
+            # LAST DESPERATE ATTEMPT
+            return _typed_encode(value.__data__(), schema)
         child_schema = schema.get(inserter_type)
         update = None
         if not child_schema:

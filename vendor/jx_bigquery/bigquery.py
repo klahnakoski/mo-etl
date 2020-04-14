@@ -447,15 +447,27 @@ class Table(Facts):
                 Log.note("{{num}} rows added", num=len(output))
         except Exception as e:
             e = Except.wrap(e)
-            if "Your client has issued a malformed or illegal request." in e:
-                Log.error("big query complains about {{data|json}}", data=output)
-            if len(rows) > 1 and "Request payload size exceeds the limit" in e:
+            if (
+                len(output) < 2
+                and "Your client has issued a malformed or illegal request." in e
+            ):
+                Log.error(
+                    "big query complains about:\n{{data|json}}",
+                    data=output,
+                    cause=e
+                )
+            elif len(rows) > 1 and (
+                "Request payload size exceeds the limit" in e
+                or "An existing connection was forcibly closed by the remote host" in e
+                or "Your client has issued a malformed or illegal request." in e
+            ):
                 # TRY A SMALLER BATCH
                 cut = len(rows) // 2
                 self.extend(rows[:cut])
                 self.extend(rows[cut:])
                 return
-            Log.error("Do not know how to handle", cause=e)
+            else:
+                Log.error("Do not know how to handle", cause=e)
 
     def add(self, row):
         self.extend([row])
